@@ -1,0 +1,88 @@
+#!/bin/bash
+source ~/.conda3_profile
+mkdir 1_RawReads 3_Alignment
+##########################Move fq files to 1_ReadsFolder
+
+mv *.gz 1_RawReads/
+
+##################Make alignment
+cd 3_Alignment
+ln -s ../1_RawReads/*.gz ./
+
+for i in `ls *_R1*|cut -d "_" -f1`
+do
+conda activate elprep
+echo $i
+fastqs=`ls $i"_"*".gz"`
+R1=`echo "${fastqs[@]1}"`
+R2=`echo "${fastqs[@]2}"`
+echo $R1
+bwa mem -t 40 -M -R '@RG\tID:'$i'\tSM:'$i'\tPL:ILM' ~/GATK_bundle_HG38/hg19/ucsc.hg19.fasta $R1 > $i".sam"
+
+~/.vep/vcalibElprp filter $i".sam" $i"_duprm.bam" --mark-duplicates --mark-optical-duplicates $i"_output.metrics" --sorting-order coordinate \
+--bqsr $i"_output.recal" --reference /home/clevergene/GATK_bundle_HG38/hg19/ucsc.hg19.elfasta \
+--known-sites /home/clevergene/GATK_bundle_HG38/hg19/dbsnp_138.hg19.elsites,/home/clevergene/GATK_bundle_HG38/hg19/Mills_and_1000G_gold_standard.indels.hg19.elsites,/home/clevergene/GATK_bundle_HG38/hg19/1000G_phase1.indels.hg19.elsites \
+--haplotypecaller $i"_output.g.vcf.gz" --nr-of-threads 40 --timed \
+--target-regions /home/clevergene/GATK_bundle_HG38/hg19/Twist_Exome_RefSeq_targets_hg19_0.bed \
+--remove-duplicates --reference-confidence GVCF --log-path ./
+
+samtools index -@ 40 $i"_duprm.bam"
+/home/clevergene/swdump/mosdepth -t 40 -T 1,10,20,30 -n -b /home/clevergene/GATK_bundle_HG38/hg19/Twist_Exome_RefSeq_targets_hg19_0_exon_gencode.bed $i $i"_duprm.bam"
+python /home/clevergene/swdump/MosdepthThresholdsSummary.py $i".thresholds.bed.gz"
+
+rm $i".sam"
+rm *.bed.gz
+rm *.csi *.txt *_output.recal
+tabix -f -p vcf $i"_output.g.vcf.gz"
+done
+
+conda activate gatk
+
+gvcfs=`ls *.g.vcf.gz|perl -pe 's|\n| -V |' |rev|sed  's| V- ||'|rev`
+
+~/swdump/gatk-4.2.6.1/gatk CombineGVCFs -V $gvcfs -R /home/clevergene/GATK_bundle_HG38/hg19/ucsc.hg19.fasta -O Combned.gvcf.gz \
+-L /home/clevergene/GATK_bundle_HG38/hg19/Twist_Exome_RefSeq_targets_hg19_0.bed
+
+~/swdump/gatk-4.2.6.1/gatk --java-options "-Xmx4G -XX:+UseParallelGC -XX:ParallelGCThreads=4" GenotypeGVCFs \
+-V Combned.gvcf.gz \
+-R /home/clevergene/GATK_bundle_HG38/hg19/ucsc.hg19.fasta \
+-L /home/clevergene/GATK_bundle_HG38/hg19/Twist_Exome_RefSeq_targets_hg19_0.bed \
+-O Output.vcf.gz
+
+~/swdump/gatk-4.2.6.1/gatk SelectVariants \
+    -V Output.vcf.gz \
+    -select-type SNP \
+    -O snps.vcf.gz
+~/swdump/gatk-4.2.6.1/gatk SelectVariants \
+    -V Output.vcf.gz \
+    -select-type INDEL \
+    -O indels.vcf.gz
+~/swdump/gatk-4.2.6.1/gatk VariantFiltration \
+    -V snps.vcf.gz \
+    -filter "QD < 2.0" --filter-name "QD2" \
+    -filter "QUAL < 30.0" --filter-name "QUAL30" \
+    -filter "SOR > 3.0" --filter-name "SOR3" \
+    -filter "FS > 60.0" --filter-name "FS60" \
+    -filter "MQ < 40.0" --filter-name "MQ40" \
+    -filter "MQRankSum < -12.5" --filter-name "MQRankSum-12.5" \
+    -filter "ReadPosRankSum < -8.0" --filter-name "ReadPosRankSum-8" \
+    -O snps_filtered.vcf.gz
+rm snps.vcf.gz
+gatk VariantFiltration \
+    -V indels.vcf.gz \
+    -filter "QD < 2.0" --filter-name "QD2" \
+    -filter "QUAL < 30.0" --filter-name "QUAL30" \
+    -filter "FS > 200.0" --filter-name "FS200" \
+    -filter "ReadPosRankSum < -20.0" --filter-name "ReadPosRankSum-20" \
+    -O indels_filtered.vcf.gz
+rm indels.vcf.gz
+picard MergeVcfs \
+          I=snps_filtered.vcf.gz \
+          I=indels_filtered.vcf.gz \
+          O=output_Filteredvariants.vcf.gz
+rm snps_filtered.vcf.gz
+rm indels.vcf.gz
+
+zcat output_Filteredvariants.vcf.gz|grep -v "clevergene"|grep -v "elprep" > Output_FinalVariants.vcf.gz
+tabix -f -p vcf Output_FinalVariants.vcf.gz
+rm output_Filteredvariants.vcf.gz
