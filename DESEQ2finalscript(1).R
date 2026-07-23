@@ -1,3 +1,4 @@
+##r script for downstream analysis of gene expression data using bioconductor_package_DESEQ2
 countdata <- read.table("Normalsample.txt", header=TRUE, row.names=1)
 countdata <- as.matrix(countdata)
 head(countdata)
